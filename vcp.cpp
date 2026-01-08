@@ -4,11 +4,13 @@
 #include <string>
 #include <vector>
 #include <sys/stat.h>
+#include <chrono> // Added for microsecond resolution
+#include <ctime>
 
 #ifdef _WIN32
     #include <windows.h>
     #include <direct.h>
-    #include <dirent.h>
+    #include <dirent.h> // Ensure you have a dirent shim for Windows (e.g. MinGW)
     #define PATH_SEP '\\'
     #define MKDIR(p) _mkdir(p)
     #ifndef S_IFDIR
@@ -51,6 +53,36 @@ std::string get_filename(const std::string& path) {
 std::string get_parent(const std::string& path) {
     size_t pos = path.find_last_of("/\\");
     return (pos == std::string::npos) ? "." : path.substr(0, pos);
+}
+
+// Recursive Mkdir (Required for deep timestamp trees)
+bool fs_mkdir_p(const std::string& path) {
+    std::string current_path = "";
+    std::string target = path;
+    
+    // Handle Windows absolute paths (C:\) logic
+    #ifdef _WIN32
+    if (target.size() > 2 && target[1] == ':') {
+        current_path += target.substr(0, 3);
+        target = target.substr(3);
+    }
+    #endif
+
+    size_t pos = 0;
+    while ((pos = target.find(PATH_SEP)) != std::string::npos) {
+        current_path += target.substr(0, pos);
+        if (!current_path.empty() && !fs_exists(current_path)) {
+            if (MKDIR(current_path.c_str()) != 0 && !fs_exists(current_path)) return false;
+        }
+        current_path += PATH_SEP;
+        target.erase(0, pos + 1);
+    }
+    // Create the final leaf
+    current_path += target;
+    if (!current_path.empty() && !fs_exists(current_path)) {
+        if (MKDIR(current_path.c_str()) != 0 && !fs_exists(current_path)) return false;
+    }
+    return true;
 }
 
 bool is_same_file(const std::string& p1, const std::string& p2) {
@@ -102,41 +134,37 @@ bool fs_copy_file(const std::string& src, const std::string& dst) {
 #endif
 }
 
-// --- Versioning Logic ---
+// --- New Timestamp Logic ---
 
-int get_next_version(const std::string& dir) {
-    int max_ver = 0;
-    DIR* d = opendir(dir.c_str());
-    if (!d) return 1;
-    struct dirent* ent;
-    while ((ent = readdir(d)) != NULL) {
-        std::string name = ent->d_name;
-        if (name == "." || name == "..") continue;
-        std::string full = fs_join(dir, name);
-        if (fs_is_dir(full)) {
-            // Strictly numeric check: "1", "2", "10"
-            char* end;
-            long val = strtol(name.c_str(), &end, 10);
-            // If conversion worked for the WHOLE string and it's positive
-            if (*end == '\0' && val > max_ver) {
-                max_ver = (int)val;
-            }
-        }
-    }
-    closedir(d);
-    return max_ver + 1;
-}
+std::string get_deep_timestamp_path() {
+    // 1. Get High Res Time
+    auto now = std::chrono::system_clock::now();
+    auto time_t_now = std::chrono::system_clock::to_time_t(now);
+    
+    // 2. Extract Microseconds
+    auto duration = now.time_since_epoch();
+    auto micros = std::chrono::duration_cast<std::chrono::microseconds>(duration).count() % 1000000;
 
-std::string create_next_version_dir(const std::string& history_root) {
-    if (!fs_exists(history_root)) MKDIR(history_root.c_str());
-    int attempt = get_next_version(history_root);
-    while (true) {
-        // Just the number: .v/filename/1
-        std::string candidate = fs_join(history_root, std::to_string(attempt));
-        if (MKDIR(candidate.c_str()) == 0) return candidate;
-        if (!fs_exists(candidate)) return "";
-        attempt++;
-    }
+    // 3. Local Time Struct
+    struct tm ltm;
+    #ifdef _WIN32
+        localtime_s(&ltm, &time_t_now);
+    #else
+        localtime_r(&time_t_now, &ltm);
+    #endif
+
+    // 4. Build Path: yyyy/MM/dd/hh/mm/ss/uuuuuu
+    char buf[256];
+    snprintf(buf, sizeof(buf), "%04d%c%02d%c%02d%c%02d%c%02d%c%02d%c%06lld",
+        ltm.tm_year + 1900, PATH_SEP,
+        ltm.tm_mon + 1, PATH_SEP,
+        ltm.tm_mday, PATH_SEP,
+        ltm.tm_hour, PATH_SEP,
+        ltm.tm_min, PATH_SEP,
+        ltm.tm_sec, PATH_SEP,
+        (long long)micros);
+    
+    return std::string(buf);
 }
 
 void archive_existing(const std::string& target, bool keep_source) {
@@ -144,25 +172,32 @@ void archive_existing(const std::string& target, bool keep_source) {
     std::string fname = get_filename(target);
     std::string v_root = fs_join(parent, ".v");
     
+    // Ensure hidden root exists
     if (!fs_exists(v_root)) { MKDIR(v_root.c_str()); hide_dir(v_root); }
 
-    std::string history_root = fs_join(v_root, fname);
-    std::string version_dir = create_next_version_dir(history_root);
+    // Logic: .v/[filename]/yyyy/MM/dd/hh/mm/ss/uuuuuu/
+    std::string file_history_root = fs_join(v_root, fname);
+    std::string time_path = get_deep_timestamp_path();
+    std::string version_dir = fs_join(file_history_root, time_path);
 
-    if (version_dir.empty()) { fprintf(stderr, "Error creating version dir for %s\n", target.c_str()); exit(1); }
+    // Create the DEEP tree
+    if (!fs_mkdir_p(version_dir)) { 
+        fprintf(stderr, "Error creating vertical structure: %s\n", version_dir.c_str()); 
+        exit(1); 
+    }
 
     std::string archive_dest = fs_join(version_dir, fname);
     
     if (keep_source) {
-        printf("  [Snapshot] %s -> %s\n", fname.c_str(), version_dir.c_str());
+        printf("  [Snapshot] %s -> .../%s\n", fname.c_str(), time_path.c_str());
         if (!fs_copy_file(target, archive_dest)) exit(1);
     } else {
-        printf("  [Archive]  %s -> %s\n", fname.c_str(), version_dir.c_str());
+        printf("  [Archive]  %s -> .../%s\n", fname.c_str(), time_path.c_str());
         if (!fs_move(target, archive_dest)) exit(1);
     }
 }
 
-// --- Recursive Logic ---
+// --- Recursive Logic (Unchanged from your snippet) ---
 
 void recursive_copy(const std::string& src, const std::string& dst, bool flat_mode) {
     DIR* d = opendir(src.c_str());
@@ -186,8 +221,8 @@ void recursive_copy(const std::string& src, const std::string& dst, bool flat_mo
         } else {
             if (fs_exists(dst_path)) {
                 if (fs_is_dir(dst_path)) {
-                     fprintf(stderr, "Skipping: %s (dest is directory)\n", dst_path.c_str());
-                     continue;
+                      fprintf(stderr, "Skipping: %s (dest is directory)\n", dst_path.c_str());
+                      continue;
                 }
                 
                 bool same = is_same_file(src_path, dst_path);
