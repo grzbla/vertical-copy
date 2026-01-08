@@ -1,6 +1,6 @@
-# VCP - Versioned Copy Tool
+# VCP - Vertical Copy Tool
 
-A smart file copy utility that automatically maintains version history of overwritten files.
+A file copy utility which backups overwritten files into .v/ersion history folder.
 
 ## Features
 
