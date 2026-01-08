@@ -139,18 +139,6 @@ vcp 20260108-153021.123456/filename ../filename -f
 - No compression (each version stores the full file)
 - No content-based deduplication across versions
 
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
 ## License
 
 MIT License - See LICENSE file for details
-
-## Author
-
-Your Name (@yourusername)
-
-## Acknowledgments
-
-Inspired by the need for simple, automatic version control for everyday file operations.
