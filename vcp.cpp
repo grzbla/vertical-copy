@@ -4,13 +4,13 @@
 #include <string>
 #include <vector>
 #include <sys/stat.h>
-#include <chrono> // Added for microsecond resolution
+#include <chrono> 
 #include <ctime>
 
 #ifdef _WIN32
     #include <windows.h>
     #include <direct.h>
-    #include <dirent.h> // Ensure you have a dirent shim for Windows (e.g. MinGW)
+    #include <dirent.h> 
     #define PATH_SEP '\\'
     #define MKDIR(p) _mkdir(p)
     #ifndef S_IFDIR
@@ -53,36 +53,6 @@ std::string get_filename(const std::string& path) {
 std::string get_parent(const std::string& path) {
     size_t pos = path.find_last_of("/\\");
     return (pos == std::string::npos) ? "." : path.substr(0, pos);
-}
-
-// Recursive Mkdir (Required for deep timestamp trees)
-bool fs_mkdir_p(const std::string& path) {
-    std::string current_path = "";
-    std::string target = path;
-    
-    // Handle Windows absolute paths (C:\) logic
-    #ifdef _WIN32
-    if (target.size() > 2 && target[1] == ':') {
-        current_path += target.substr(0, 3);
-        target = target.substr(3);
-    }
-    #endif
-
-    size_t pos = 0;
-    while ((pos = target.find(PATH_SEP)) != std::string::npos) {
-        current_path += target.substr(0, pos);
-        if (!current_path.empty() && !fs_exists(current_path)) {
-            if (MKDIR(current_path.c_str()) != 0 && !fs_exists(current_path)) return false;
-        }
-        current_path += PATH_SEP;
-        target.erase(0, pos + 1);
-    }
-    // Create the final leaf
-    current_path += target;
-    if (!current_path.empty() && !fs_exists(current_path)) {
-        if (MKDIR(current_path.c_str()) != 0 && !fs_exists(current_path)) return false;
-    }
-    return true;
 }
 
 bool is_same_file(const std::string& p1, const std::string& p2) {
@@ -134,18 +104,16 @@ bool fs_copy_file(const std::string& src, const std::string& dst) {
 #endif
 }
 
-// --- New Timestamp Logic ---
+// --- Timestamp Logic ---
 
-std::string get_deep_timestamp_path() {
-    // 1. Get High Res Time
+std::string get_timestamp_foldername() {
     auto now = std::chrono::system_clock::now();
     auto time_t_now = std::chrono::system_clock::to_time_t(now);
     
-    // 2. Extract Microseconds
+    // Extract Microseconds
     auto duration = now.time_since_epoch();
     auto micros = std::chrono::duration_cast<std::chrono::microseconds>(duration).count() % 1000000;
 
-    // 3. Local Time Struct
     struct tm ltm;
     #ifdef _WIN32
         localtime_s(&ltm, &time_t_now);
@@ -153,15 +121,15 @@ std::string get_deep_timestamp_path() {
         localtime_r(&time_t_now, &ltm);
     #endif
 
-    // 4. Build Path: yyyy/MM/dd/hh/mm/ss/uuuuuu
-    char buf[256];
-    snprintf(buf, sizeof(buf), "%04d%c%02d%c%02d%c%02d%c%02d%c%02d%c%06lld",
-        ltm.tm_year + 1900, PATH_SEP,
-        ltm.tm_mon + 1, PATH_SEP,
-        ltm.tm_mday, PATH_SEP,
-        ltm.tm_hour, PATH_SEP,
-        ltm.tm_min, PATH_SEP,
-        ltm.tm_sec, PATH_SEP,
+    // Format: yyyyMMdd-HHmmss-uuuuuu (Folder Name)
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%04d%02d%02d-%02d%02d%02d.%06lld",
+        ltm.tm_year + 1900,
+        ltm.tm_mon + 1,
+        ltm.tm_mday,
+        ltm.tm_hour,
+        ltm.tm_min,
+        ltm.tm_sec,
         (long long)micros);
     
     return std::string(buf);
@@ -172,32 +140,35 @@ void archive_existing(const std::string& target, bool keep_source) {
     std::string fname = get_filename(target);
     std::string v_root = fs_join(parent, ".v");
     
-    // Ensure hidden root exists
+    // 1. Ensure .v hidden root
     if (!fs_exists(v_root)) { MKDIR(v_root.c_str()); hide_dir(v_root); }
 
-    // Logic: .v/[filename]/yyyy/MM/dd/hh/mm/ss/uuuuuu/
-    std::string file_history_root = fs_join(v_root, fname);
-    std::string time_path = get_deep_timestamp_path();
-    std::string version_dir = fs_join(file_history_root, time_path);
+    // 2. Ensure .v/filename container
+    std::string file_history_dir = fs_join(v_root, fname);
+    if (!fs_exists(file_history_dir)) MKDIR(file_history_dir.c_str());
 
-    // Create the DEEP tree
-    if (!fs_mkdir_p(version_dir)) { 
-        fprintf(stderr, "Error creating vertical structure: %s\n", version_dir.c_str()); 
-        exit(1); 
+    // 3. Create the Timestamp Folder: .v/filename/20260108-153021-999999
+    std::string stamp_folder = get_timestamp_foldername();
+    std::string full_version_dir = fs_join(file_history_dir, stamp_folder);
+    
+    if (MKDIR(full_version_dir.c_str()) != 0) {
+        fprintf(stderr, "Error creating timestamp dir: %s\n", full_version_dir.c_str());
+        exit(1);
     }
 
-    std::string archive_dest = fs_join(version_dir, fname);
+    // 4. Place file inside: .v/filename/TIMESTAMP/filename.ext
+    std::string final_dest = fs_join(full_version_dir, fname);
     
     if (keep_source) {
-        printf("  [Snapshot] %s -> .../%s\n", fname.c_str(), time_path.c_str());
-        if (!fs_copy_file(target, archive_dest)) exit(1);
+        printf("  [Snapshot] %s -> .../%s/%s\n", fname.c_str(), stamp_folder.c_str(), fname.c_str());
+        if (!fs_copy_file(target, final_dest)) exit(1);
     } else {
-        printf("  [Archive]  %s -> .../%s\n", fname.c_str(), time_path.c_str());
-        if (!fs_move(target, archive_dest)) exit(1);
+        printf("  [Archive]  %s -> .../%s/%s\n", fname.c_str(), stamp_folder.c_str(), fname.c_str());
+        if (!fs_move(target, final_dest)) exit(1);
     }
 }
 
-// --- Recursive Logic (Unchanged from your snippet) ---
+// --- Recursive Logic (Standard) ---
 
 void recursive_copy(const std::string& src, const std::string& dst, bool flat_mode) {
     DIR* d = opendir(src.c_str());
@@ -227,9 +198,7 @@ void recursive_copy(const std::string& src, const std::string& dst, bool flat_mo
                 
                 bool same = is_same_file(src_path, dst_path);
                 if (same) {
-                    if (!flat_mode) {
-                        archive_existing(dst_path, true); 
-                    }
+                    if (!flat_mode) archive_existing(dst_path, true); 
                     continue; 
                 }
 
