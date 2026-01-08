@@ -163,7 +163,7 @@ void archive_existing(const std::string& target, bool keep_source) {
 
 // --- Core Recursive Logic ---
 
-void recursive_copy(const std::string& src, const std::string& dst, bool sterile) {
+void recursive_copy(const std::string& src, const std::string& dst, bool flat) {
     DIR* d = opendir(src.c_str());
     if (!d) return;
 
@@ -181,7 +181,7 @@ void recursive_copy(const std::string& src, const std::string& dst, bool sterile
         std::string dst_path = fs_join(dst, name);
 
         if (fs_is_dir(src_path)) {
-            recursive_copy(src_path, dst_path, sterile);
+            recursive_copy(src_path, dst_path, flat);
         } else {
             // Handle File Collision
             if (fs_exists(dst_path)) {
@@ -193,15 +193,15 @@ void recursive_copy(const std::string& src, const std::string& dst, bool sterile
                 // Identity Protection: Don't destroy file if it is the source
                 bool same = is_same_file(src_path, dst_path);
                 if (same) {
-                    if (!sterile) {
-                        // In version mode, we snapshot. In sterile, we do nothing.
+                    if (!flat) {
+                        // In version mode, we snapshot. In flat, we do nothing.
                         archive_existing(dst_path, true); 
                     }
                     continue; 
                 }
 
-                // If NOT sterile, archive existing file before overwrite
-                if (!sterile) archive_existing(dst_path, false);
+                // If NOT flat, archive existing file before overwrite
+                if (!flat) archive_existing(dst_path, false);
             }
             
             if (fs_copy_file(src_path, dst_path)) printf("OK: %s\n", dst_path.c_str());
@@ -213,18 +213,18 @@ void recursive_copy(const std::string& src, const std::string& dst, bool sterile
 
 int main(int argc, char* argv[]) {
     // 1. Parse Args (Flexible flags)
-    bool sterile = false;
+    bool flat = false;
     std::vector<std::string> args;
     
     for(int i = 1; i < argc; i++) {
         std::string arg = argv[i];
-        if (arg == "-f" || arg == "--flat") sterile = true;
+        if (arg == "-f" || arg == "--flat") flat = true;
         else args.push_back(arg);
     }
 
     if (args.size() < 2) { 
-        printf("Usage: vcp [SOURCE] [DESTINATION] [-s]\n");
-        printf("  -s, --flat   Sterile mode: Standard overwrite, no version history.\n");
+        printf("Usage: vcp [SOURCE] [DESTINATION] [-f]\n");
+        printf("  -f, --flat   flat mode: Standard overwrite, no version history.\n");
         return 1; 
     }
 
@@ -239,8 +239,8 @@ int main(int argc, char* argv[]) {
         // cp dir/ dir2/ -> dir2/dir
         if (fs_exists(dest) && fs_is_dir(dest)) dest = fs_join(dest, get_filename(src));
         
-        if (sterile) printf("Mode: Flat Copy (Recursive)\n");
-        recursive_copy(src, dest, sterile);
+        if (flat) printf("Mode: Flat Copy (Recursive)\n");
+        recursive_copy(src, dest, flat);
     } 
     // SINGLE FILE
     else {
@@ -251,14 +251,14 @@ int main(int argc, char* argv[]) {
             
             bool same = is_same_file(src, dest);
             if (same) {
-                if (sterile) return 0; // cp behavior: ignore
+                if (flat) return 0; // cp behavior: ignore
                 archive_existing(dest, true);
                 printf("OK: Snapshot created.\n");
                 return 0;
             }
 
-            // If NOT sterile, archive before overwrite
-            if (!sterile) archive_existing(dest, false);
+            // If NOT flat, archive before overwrite
+            if (!flat) archive_existing(dest, false);
         }
         
         if (fs_copy_file(src, dest)) printf("OK: %s -> %s\n", get_filename(src).c_str(), dest.c_str());
@@ -266,3 +266,4 @@ int main(int argc, char* argv[]) {
     }
     return 0;
 }
+
