@@ -53,13 +53,11 @@ std::string get_parent(const std::string& path) {
     return (pos == std::string::npos) ? "." : path.substr(0, pos);
 }
 
-// Check if two paths point to the exact same inode/file
 bool is_same_file(const std::string& p1, const std::string& p2) {
     struct stat s1, s2;
     if (stat(p1.c_str(), &s1) != 0 || stat(p2.c_str(), &s2) != 0) return false;
     if (s1.st_dev == s2.st_dev && s1.st_ino == s2.st_ino && s1.st_ino != 0) return true;
 #ifdef _WIN32
-    // Windows fallback for FS without inodes (FAT32/ExFAT)
     char abs1[MAX_PATH], abs2[MAX_PATH];
     if (_fullpath(abs1, p1.c_str(), MAX_PATH) && _fullpath(abs2, p2.c_str(), MAX_PATH)) {
         return _stricmp(abs1, abs2) == 0;
@@ -116,10 +114,12 @@ int get_next_version(const std::string& dir) {
         if (name == "." || name == "..") continue;
         std::string full = fs_join(dir, name);
         if (fs_is_dir(full)) {
-            if (name.size() > 1 && name[0] == 'v') {
-                char* end;
-                long val = strtol(name.c_str() + 1, &end, 10);
-                if (*end == '\0' && val > max_ver) max_ver = (int)val;
+            // Strictly numeric check: "1", "2", "10"
+            char* end;
+            long val = strtol(name.c_str(), &end, 10);
+            // If conversion worked for the WHOLE string and it's positive
+            if (*end == '\0' && val > max_ver) {
+                max_ver = (int)val;
             }
         }
     }
@@ -131,7 +131,8 @@ std::string create_next_version_dir(const std::string& history_root) {
     if (!fs_exists(history_root)) MKDIR(history_root.c_str());
     int attempt = get_next_version(history_root);
     while (true) {
-        std::string candidate = fs_join(history_root, "v" + std::to_string(attempt));
+        // Just the number: .v/filename/1
+        std::string candidate = fs_join(history_root, std::to_string(attempt));
         if (MKDIR(candidate.c_str()) == 0) return candidate;
         if (!fs_exists(candidate)) return "";
         attempt++;
@@ -161,9 +162,9 @@ void archive_existing(const std::string& target, bool keep_source) {
     }
 }
 
-// --- Core Recursive Logic ---
+// --- Recursive Logic ---
 
-void recursive_copy(const std::string& src, const std::string& dst, bool flat) {
+void recursive_copy(const std::string& src, const std::string& dst, bool flat_mode) {
     DIR* d = opendir(src.c_str());
     if (!d) return;
 
@@ -173,7 +174,7 @@ void recursive_copy(const std::string& src, const std::string& dst, bool flat) {
     while ((ent = readdir(d)) != NULL) {
         std::string name = ent->d_name;
         
-        // GLOBAL IGNORE LIST
+        // IGNORE: .v, .git, .svn, .hg
         if (name == "." || name == ".." || name == ".v" || 
             name == ".git" || name == ".svn" || name == ".hg") continue;
 
@@ -181,27 +182,23 @@ void recursive_copy(const std::string& src, const std::string& dst, bool flat) {
         std::string dst_path = fs_join(dst, name);
 
         if (fs_is_dir(src_path)) {
-            recursive_copy(src_path, dst_path, flat);
+            recursive_copy(src_path, dst_path, flat_mode);
         } else {
-            // Handle File Collision
             if (fs_exists(dst_path)) {
                 if (fs_is_dir(dst_path)) {
                      fprintf(stderr, "Skipping: %s (dest is directory)\n", dst_path.c_str());
                      continue;
                 }
                 
-                // Identity Protection: Don't destroy file if it is the source
                 bool same = is_same_file(src_path, dst_path);
                 if (same) {
-                    if (!flat) {
-                        // In version mode, we snapshot. In flat, we do nothing.
+                    if (!flat_mode) {
                         archive_existing(dst_path, true); 
                     }
                     continue; 
                 }
 
-                // If NOT flat, archive existing file before overwrite
-                if (!flat) archive_existing(dst_path, false);
+                if (!flat_mode) archive_existing(dst_path, false);
             }
             
             if (fs_copy_file(src_path, dst_path)) printf("OK: %s\n", dst_path.c_str());
@@ -212,19 +209,19 @@ void recursive_copy(const std::string& src, const std::string& dst, bool flat) {
 }
 
 int main(int argc, char* argv[]) {
-    // 1. Parse Args (Flexible flags)
-    bool flat = false;
+    // 1. Parse Args
+    bool flat_mode = false;
     std::vector<std::string> args;
     
     for(int i = 1; i < argc; i++) {
         std::string arg = argv[i];
-        if (arg == "-f" || arg == "--flat") flat = true;
+        if (arg == "-f" || arg == "--flat") flat_mode = true;
         else args.push_back(arg);
     }
 
     if (args.size() < 2) { 
         printf("Usage: vcp [SOURCE] [DESTINATION] [-f]\n");
-        printf("  -f, --flat   flat mode: Standard overwrite, no version history.\n");
+        printf("  -f, --flat   Flat mode: Standard overwrite, no version history.\n");
         return 1; 
     }
 
@@ -234,15 +231,12 @@ int main(int argc, char* argv[]) {
     if (!fs_exists(src)) { fprintf(stderr, "Error: Source not found: %s\n", src.c_str()); return 1; }
 
     // 2. Logic Dispatch
-    // AUTO-RECURSION
     if (fs_is_dir(src)) {
-        // cp dir/ dir2/ -> dir2/dir
         if (fs_exists(dest) && fs_is_dir(dest)) dest = fs_join(dest, get_filename(src));
         
-        if (flat) printf("Mode: Flat Copy (Recursive)\n");
-        recursive_copy(src, dest, flat);
+        if (flat_mode) printf("Mode: Flat Copy (Recursive)\n");
+        recursive_copy(src, dest, flat_mode);
     } 
-    // SINGLE FILE
     else {
         if (fs_is_dir(dest)) dest = fs_join(dest, get_filename(src));
         
@@ -251,14 +245,13 @@ int main(int argc, char* argv[]) {
             
             bool same = is_same_file(src, dest);
             if (same) {
-                if (flat) return 0; // cp behavior: ignore
+                if (flat_mode) return 0;
                 archive_existing(dest, true);
                 printf("OK: Snapshot created.\n");
                 return 0;
             }
 
-            // If NOT flat, archive before overwrite
-            if (!flat) archive_existing(dest, false);
+            if (!flat_mode) archive_existing(dest, false);
         }
         
         if (fs_copy_file(src, dest)) printf("OK: %s -> %s\n", get_filename(src).c_str(), dest.c_str());
@@ -266,4 +259,3 @@ int main(int argc, char* argv[]) {
     }
     return 0;
 }
-
