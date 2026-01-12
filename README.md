@@ -138,7 +138,8 @@ vcp 20260108-153021.123456/filename ../filename -f
 - No automatic cleanup of old versions (manual management required)
 - No compression (each version stores the full file)
 - No content-based deduplication across versions
+- Google AI made it. It's pretty great for small CLI shit.
 
 ## License
 
-MIT License - See LICENSE file for details
+MIT License - Or whatever.
